@@ -107,10 +107,10 @@ def __private():
 				value_list ::= , value
 				value_list ::= , value value_list
 				const ::= c_string
-				tuple ::= {}
+				tuple ::= { }
 				tuple ::= { result }
 				tuple ::= { result result_list }
-				list ::= []
+				list ::= [ ]
 				list ::= [ value ]
 				list ::= [ value value_list ]
 				list ::= [ result ]
@@ -268,11 +268,19 @@ def __private():
 		def __repr__(self):
 			return pprint.pformat(self.__dict__)
 
+		def __nonzero__(self):
+			return len(self.__dict__) > 0
+
 		def __getitem__(self, i):
-			if i == 0:
+			if i == 0 and len(self.__dict__) > 0:
 				return self
 			else:
 				raise IndexError
+
+		def __getattr__(self, name):
+			if name.startswith('__'):
+				raise AttributeError
+			return None
 
 		def graft(self, dict_):
 			for name, value in dict_.items():
@@ -376,11 +384,13 @@ if __name__ == '__main__':
 		test5 = '''=class,variable={frame={x="2"},frame={x="2"}, regs={"1","2","3"}}
 	^running
 	'''
+		test6 = '10^done,stack-args={frame={level="0",args={}}},time={wallclock="0.00006",user="0.00004",system="0.00002",start="1210530442.460765",end="1210530442.460825"}\n'
 
 		run_test(test1)
 		run_test(test2)
 		run_test(test3)
 		run_test(test4)
 		run_test(test5)
+		run_test(test6)
 
 	main()

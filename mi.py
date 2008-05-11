@@ -602,11 +602,14 @@ if __name__ == "__main__":
 				result = gdb.stack_list_frames().wait()
 				print 'stack'
 				for frame in result.stack.frame:
-					print '\t%s, at %s:%s' %(
-						frame.func,
-						frame.file,
-						frame.line
-					)
+					if frame.file:
+						print '\t%s, at %s:%s' % (
+							frame.func,
+							frame.file,
+							frame.line
+						)
+					else:
+						print '\t%s' % (frame.func)
 			except GdbError, ex:
 				print 'gdb error: ' + ex.message
 
@@ -631,7 +634,7 @@ if __name__ == "__main__":
 		handler = MyHandler()
 		gdb = Gdb(handler)
 		try:
-			gdb.file('qi')
+			gdb.file('qi_release')
 			#gdb.core('core')
 			print_registers(gdb)
 			result = gdb.start().wait()
@@ -663,9 +666,9 @@ if __name__ == "__main__":
 			print 'run'
 			gdb.run().wait()
 
-			print 'sleep 1 second'
+			print 'sleep'
 			import time
-			time.sleep(1)
+			time.sleep(0.1)
 
 			print 'interrupt'
 			result = gdb.interrupt().wait()
