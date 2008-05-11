@@ -3,7 +3,8 @@
 import sys
 import os
 import re
-from GdbConsole import GdbConsole
+import pprint
+from subprocess import *
 
 """
 0x6840 in
@@ -50,9 +51,47 @@ eip            0x950aa9e6	0x950aa9e6 <mach_msg_trap+10>
 """
 REGISTER_PATTERN = re.compile('(\S+)\s+(0x[\dA-Fa-f]+)\s+(\S+)')
 
+"""
+argv = (const char **) 0xbffff590
+"""
+VARIABLE_PATTERN = re.compile('([\S ]+) = ([\S ]+)')
+
+GDB_PROMPT = '(gdb) '
+GDB_CMDLINE = 'gdb -n -q'
+
+class GdbConsole:
+	def __init__(self):
+		self.proc = Popen(GDB_CMDLINE , 0, shell=True, stdin=PIPE, stdout=PIPE, stderr=STDOUT)
+
+	def read_until_prompt(self):
+		buf = ''
+		while(True):
+			ch = self.proc.stdout.read(1)
+			if not ch:
+				return buf
+
+			buf += ch
+			if len(buf) < len(GDB_PROMPT):
+				continue
+
+			if buf.endswith(GDB_PROMPT):
+				outlen = len(buf) - len(GDB_PROMPT)
+				return buf[:outlen]
+
+	def send_cmd(self, cmd):
+		cmd_line = cmd + '\n'
+		self.proc.stdin.write(cmd_line)
+		#sys.stdout.write('$ ' + cmd_line)
+
+	def communicate(self, cmd):
+		self.send_cmd(cmd)
+		output = self.read_until_prompt()
+		#sys.stdout.write(output)
+		return output
+
 class GdbThread:
 	def __init__(self, gdb, txt):
-		self.gdb = gdb
+		self.__gdb = gdb
 		self._parse(txt)
 
 	def _parse(self, line):
@@ -67,11 +106,11 @@ class GdbThread:
 		self.source = result.group('src')
 
 	def info(self):
-		return self.gdb.info_thread(self.num)
+		return self.__gdb.info_thread(self.num)
 
 class GdbFrame:
 	def __init__(self, gdb, txt):
-		self.gdb = gdb
+		self.__gdb = gdb
 		self._parse(txt)
 
 	def _parse(self, txt):
@@ -79,15 +118,23 @@ class GdbFrame:
 		self.num = result.group('num')
 		self.pc = result.group('pc')
 		self.fun = result.group('fun')
-		self.args = result.group('args')
+		#self.args = result.group('args')
 		self.source = result.group('src')
 
 	def info(self):
-		return self.gdb.info_frame(self.num)
+		return self.__gdb.info_frame(self.num)
+
+	def args(self):
+		self.__gdb.select_frame(self.num)
+		return self.__gdb.info_args()
+
+	def locals(self):
+		self.__gdb.select_frame(self.num)
+		return self.__gdb.info_locals()
 
 class GdbRegister:
 	def __init__(self, gdb, txt):
-		self.gdb = gdb
+		self.__gdb = gdb
 		self._parse(txt)
 
 	def _parse(self, txt):
@@ -95,6 +142,16 @@ class GdbRegister:
 		self.name = result.group(1)
 		self.hex_value = result.group(2)
 		self.value = result.group(3)
+
+class GdbVariable:
+	def __init__(self, gdb, txt):
+		self.__gdb = gdb
+		self._parse(txt)
+
+	def _parse(self, txt):
+		result = VARIABLE_PATTERN.match(txt)
+		self.name = result.group(1)
+		self.value = result.group(2)
 
 class Gdb:
 	def __init__(self):
@@ -223,17 +280,13 @@ class Gdb:
 
 	def run(self, args=None):
 		txt = self._cmd('run', args)
-		if txt.startswith('The program being debugged has been started already.'):
-			txt = self._cmd('y')
-		return txt
+		self._process_run(txt)
 
 	def signal(self): pass
 
 	def start(self, args=None):
 		txt = self._cmd('start', args)
-		if txt.startswith('The program being debugged has been started already.'):
-			txt = self._cmd('y')
-		return txt
+		self._process_run(txt)
 
 	def step(self, count=None):
 		"""step into"""
@@ -253,6 +306,11 @@ class Gdb:
 
 	def until(self, location=None):
 		return self._cmd('until', location)
+
+	def _process_run(self, txt):
+		if txt.startswith('The program being debugged has been started already.'):
+			txt = self._cmd('y')
+		return txt
 
 ####################################################
 	# breakpoints
@@ -283,16 +341,31 @@ class Gdb:
 ####################################################
 	# info
 	def info_breakpoints(self):	pass
-#	def info_all_registers(self): pass
-	def info_args(self): pass
+
+	def _parse_variables(self, txt):
+		ret = {}
+		for line in txt.splitlines():
+			var = GdbVariable(self, line)
+			ret[var.name] = var
+		return ret
+
+	def info_args(self):
+		txt = self._cmd('info args')
+		return self._parse_variables(txt)
+
 	def info_address(self, symbol): pass
 	def info_float(self): pass
 
 	def info_frame(self, num):
 		return self._cmd('info frame', num)
 
-	def info_functions(self): pass
-	def info_locals(self): pass
+	def info_functions(self):
+		return self._cmd('info functions')
+
+	def info_locals(self):
+		txt = self._cmd('info locals')
+		return self._parse_variables(txt)
+
 	def info_mem(self): pass
 	def info_pid(self): pass
 	def info_program(self): pass
@@ -339,22 +412,26 @@ class Gdb:
 
 try:
 	gdb = Gdb()
-	gdb.file('/Users/franklaub/bin/qi')
+	gdb.file('qi')
 	gdb.start()
 
 	threads = gdb.info_threads().values()
 	for thread in threads:
 		print thread.info()
 
+	gdb.step(3)
+
 	stack = gdb.backtrace().values()
 	for frame in stack:
 		print frame.fun
+		for local in frame.locals().values():
+			print local.name + ': ' + local.value
+		print
 
 	all = gdb.info_registers().values()
 	for reg in all:
 		print reg.name + ' = ' + reg.hex_value + ' ' + reg.value
 
-	gdb.detach()
 	gdb.quit()
 
 except Exception, ex:
