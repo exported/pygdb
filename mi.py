@@ -1,5 +1,6 @@
 #!/usr/bin/python
 
+import os
 import mi_parser
 import threading
 from subprocess import *
@@ -31,7 +32,6 @@ def flatten(x):
 
 class GdbConsole:
 	def __init__(self):
-		self.prompt = GDB_PROMPT
 		self.proc = Popen(GDB_CMDLINE, 0, shell=True, stdin=PIPE, stdout=PIPE, stderr=STDOUT)
 
 	def read_until_prompt(self):
@@ -81,15 +81,46 @@ class GdbReader:
 			callback = getattr(self.__dispatcher, 'on_' + record.type)
 			callback(record)
 
+class InferiorReader:
+	def __init__(self, gdb, dispatcher):
+		self.__gdb = gdb
+		self.__dispatcher = dispatcher
+		self.__thread = threading.Thread(target=self.__run_loop, name='InferiorReader')
+		self.__thread.setDaemon(True)
+
+	def start(self):
+		self.__master, self.__slave = os.openpty()
+		self.__stdout = os.fdopen(self.__master)
+		self.__tty = os.ttyname(self.__slave)
+		self.__gdb.inferior_tty_set(self.__tty)
+		self.__thread.start()
+
+	def stop(self):
+		#print 'close slave'
+		os.close(self.__slave)
+		#print 'close master'
+		self.__stdout.close()
+		#print 'join'
+		self.__thread.join()
+
+	def __run_loop(self):
+		while(True):
+			line = self.__stdout.readline()
+			if not line:
+				break
+			print 'inferior: %s' % line
+
 class Gdb:
-	def __init__(self, handler, verbose=0):
+	def __init__(self, handler=None, verbose=0):
 		self.console = GdbConsole()
 		self.console.read_until_prompt()
 		self.verbose = verbose
+		self.__next_token = 1
 		self.__dispatcher = GdbDispatcher(self, handler)
 		self.__reader = GdbReader(self, self.__dispatcher)
+#		self.__inferior = InferiorReader(self, self.__dispatcher)
 		self.__reader.start()
-		self.__next_token = 1
+#		self.__inferior.start()
 
 	def _cmd(self, cmd, args=None):
 		if args is not None:
@@ -116,6 +147,7 @@ class Gdb:
 	# general
 	def wait(self):
 		self.__reader.stop()
+#		self.__inferior.stop()
 
 	def help(self):
 		return self._cmd('h')
@@ -130,7 +162,7 @@ class Gdb:
 		'''use this with caution, the output is not parsable'''
 		return self._cmd('-interpreter-exec', [ interpreter, command ])
 
-	def inferior_tty_set(self, interpreter, tty):
+	def inferior_tty_set(self, tty):
 		return self._cmd('-inferior-tty-set', tty)
 
 	def inferior_tty_show(self):
@@ -410,19 +442,29 @@ class GdbError(Exception): pass
 class GdbAsyncResult:
 	def __init__(self, dispatcher, token):
 		self.__dispatcher = dispatcher
-		self.__event = threading.Event()
+		self.__condition = threading.Condition()
 		self.token = token
 		self.result = None
 		self.status = 'pending'
+		self.__dispatcher.register_token(self.token, self.__on_complete)
 
 	def __on_complete(self, status, result):
-		self.status = status
-		self.result = result
-		self.__event.set()
+		try:
+			self.__condition.acquire()
+			self.status = status
+			self.result = result
+			self.__condition.notify()
+		finally:
+			self.__condition.release()
 
 	def wait(self):
-		self.__dispatcher.register_token(self.token, self.__on_complete)
-		self.__event.wait()
+		try:
+			self.__condition.acquire()
+			while not self.result:
+				self.__condition.wait()
+		finally:
+			self.__condition.release()
+
 		if self.status == 'error':
 			raise GdbError, self.result.msg
 		return self.result
@@ -431,7 +473,7 @@ class GdbDispatcher:
 	def __init__(self, gdb, handler):
 		self.__gdb = gdb
 		self.__handler = handler
-		self.__handler.on_gdb(gdb)
+		if self.__handler: self.__handler.on_gdb(gdb)
 		self.__delegates = {}
 
 	def __print_event(self, event):
@@ -445,7 +487,7 @@ class GdbDispatcher:
 		print '%s: %s' % (output.type, output.value)
 
 	def __call_handler(self, method, args):
-		if hasattr(self.__handler, method):
+		if self.__handler and hasattr(self.__handler, method):
 			attr = getattr(self.__handler, method)
 			apply(attr, args)
 
@@ -512,112 +554,127 @@ class GdbDispatcher:
 			self.__call_handler('on_complete', [token, status, results])
 
 if __name__ == "__main__":
-	class MyHandler:
-		def __init__(self, verbose=0):
-			self.verbose = verbose
+	def main():
+		class MyHandler:
+			def __init__(self, verbose=0):
+				self.verbose = verbose
 
-		def on_gdb(self, gdb):
-			self.__gdb = gdb
+			def on_gdb(self, gdb):
+				self.__gdb = gdb
 
-		def on_running(self, event):
-			if self.verbose: print 'running'
+			def on_running(self, event):
+				if self.verbose: print 'running'
 
-		def on_stopped(self, event):
-			if self.verbose: print 'stopped'
+			def on_stopped(self, event):
+				if self.verbose: print 'stopped'
 
-		def on_complete(self, token, status, results):
-			if self.verbose: print 'complete'
+			def on_complete(self, token, status, results):
+				if self.verbose: print 'complete'
 
-		def on_error(self, token, results):
-			print 'error: %s' % results
+			def on_error(self, token, results):
+				print 'error: %s' % results
 
-		def on_done(self, token, results):
-			if self.verbose: print 'done'
+			def on_done(self, token, results):
+				if self.verbose: print 'done'
 
-	def print_locals(gdb):
+		def print_locals(gdb):
+			try:
+				result = gdb.stack_list_locals().wait()
+				print 'locals'
+				for local in result.locals:
+					print '\t%s = %s' % ( local.name, local.value )
+			except GdbError, ex:
+				print 'gdb error: ' + ex.message
+
+		def print_arguments(gdb):
+			try:
+				result = gdb.stack_list_arguments().wait()
+				print 'args'
+				for frame in result.stack_args.frame:
+					print '\tframe: ' + frame.level
+					for arg in frame.args:
+						print '\t\t%s = %s' % ( arg.name, arg.value )
+			except GdbError, ex:
+				print 'gdb error: ' + ex.message
+
+		def print_stack(gdb):
+			try:
+				result = gdb.stack_list_frames().wait()
+				print 'stack'
+				for frame in result.stack.frame:
+					print '\t%s, at %s:%s' %(
+						frame.func,
+						frame.file,
+						frame.line
+					)
+			except GdbError, ex:
+				print 'gdb error: ' + ex.message
+
+		def print_registers(gdb, registers=None, header='registers'):
+			try:
+				names = gdb.data_list_register_names().wait()
+				result = gdb.data_list_register_values(regno=registers).wait()
+				print header
+				for register in result.register_values:
+					name = names.register_names[int(register.number)]
+					print '\t%s: %s' % (name, register.value)
+			except GdbError, ex:
+				print 'gdb error: ' + ex.message
+
+		def print_changed_registers(gdb):
+			try:
+				changed = gdb.data_list_changed_registers().wait()
+				print_registers(gdb, changed.changed_registers, 'changed')
+			except GdbError, ex:
+				print 'gdb error: ' + ex.message
+
+		handler = MyHandler()
+		gdb = Gdb(handler)
 		try:
-			result = gdb.stack_list_locals().wait()
-			print 'locals'
-			for local in result.locals:
-				print '\t%s = %s' % ( local.name, local.value )
-		except GdbError, ex:
-			print 'gdb error: ' + ex.message
+			gdb.file('qi')
+			#gdb.core('core')
+			print_registers(gdb)
+			result = gdb.start().wait()
+			print 'start: bkptno: %s, reason: %s, thread-id: %s' % (
+				result.bkptno,
+				result.reason,
+				result.thread_id
+			)
 
-	def print_arguments(gdb):
-		try:
-			result = gdb.stack_list_arguments().wait()
-			print 'args'
-			for frame in result.stack_args.frame:
-				print '\tframe: ' + frame.level
-				for arg in frame.args:
-					print '\t\t%s = %s' % ( arg.name, arg.value )
-		except GdbError, ex:
-			print 'gdb error: ' + ex.message
+			print_changed_registers(gdb)
+			print_stack(gdb)
+			print_arguments(gdb)
+			print_locals(gdb)
 
-	def print_stack(gdb):
-		try:
-			result = gdb.stack_list_frames().wait()
-			print 'stack'
-			for frame in result.stack.frame:
-				print '\t%s, at %s:%s' %(
-					frame.func,
-					frame.file,
-					frame.line
-				)
-		except GdbError, ex:
-			print 'gdb error: ' + ex.message
+			print 'step'
+			result = gdb.step().wait()
+			print_changed_registers(gdb)
+			print 'step'
+			result = gdb.step().wait()
+			print_changed_registers(gdb)
+			print 'step'
+			result = gdb.step().wait()
+			print_changed_registers(gdb)
 
-	def print_registers(gdb, registers=None, header='registers'):
-		try:
-			names = gdb.data_list_register_names().wait()
-			result = gdb.data_list_register_values(regno=registers).wait()
-			print header
-			for register in result.register_values:
-				name = names.register_names[int(register.number)]
-				print '\t%s: %s' % (name, register.value)
-		except GdbError, ex:
-			print 'gdb error: ' + ex.message
+			print_stack(gdb)
+			print_arguments(gdb)
+			print_locals(gdb)
 
-	def print_changed_registers(gdb):
-		try:
-			changed = gdb.data_list_changed_registers().wait()
-			print_registers(gdb, changed.changed_registers, 'changed')
-		except GdbError, ex:
-			print 'gdb error: ' + ex.message
+			print 'run'
+			gdb.run().wait()
 
-	handler = MyHandler()
-	gdb = Gdb(handler)
-	try:
-		gdb.file('qi')
-		gdb.core('core')
-		print_registers(gdb)
-		result = gdb.start().wait()
-		print 'start: bkptno: %s, reason: %s, thread-id: %s' % (
-			result.bkptno,
-			result.reason,
-			result.thread_id
-		)
+			print 'sleep 1 second'
+			import time
+			time.sleep(1)
 
-		print_changed_registers(gdb)
-		print_stack(gdb)
-		print_arguments(gdb)
-		print_locals(gdb)
+			print 'interrupt'
+			result = gdb.interrupt().wait()
+			print_stack(gdb)
 
-		print 'step'
-		result = gdb.step().wait()
-		print_changed_registers(gdb)
-		print 'step'
-		result = gdb.step().wait()
-		print_changed_registers(gdb)
-		print 'step'
-		result = gdb.step().wait()
-		print_changed_registers(gdb)
+			print 'run to completion'
+			result = gdb.run().wait()
 
-		print_stack(gdb)
-		print_arguments(gdb)
-		print_locals(gdb)
-
-	except Exception, ex:
-		print ex.message
-	gdb.quit()
-
+		except Exception, ex:
+			print ex.message
+		gdb.quit()
+	main()
