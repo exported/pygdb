@@ -1,5 +1,6 @@
 #!/usr/bin/python
 
+import sys
 import os
 import mi_parser
 import threading
@@ -31,16 +32,18 @@ def flatten(x):
 	return result
 
 class GdbConsole:
-	def __init__(self):
+	def __init__(self, verbose=0):
+		self.__verbose = verbose
 		self.proc = Popen(GDB_CMDLINE, 0, shell=True, stdin=PIPE, stdout=PIPE, stderr=STDOUT)
 
 	def read_until_prompt(self):
 		lines = []
 		while(True):
 			line = self.proc.stdout.readline()
-			#print line
 			if not line or line == GDB_PROMPT:
 				return lines
+			if self.__verbose >= 3:
+				sys.stdout.write(line)
 			lines.append(line)
 
 	def send_cmd(self, cmd):
@@ -73,8 +76,7 @@ class GdbReader:
 					output = mi_parser.process(line)
 					self.__process_output(output)
 				except Exception, ex:
-					print 'parsing error: %s' % ex.message
-					print 'for gdb output: %s' % output
+					self.__dispatcher.on_unknown(line)
 
 	def __process_output(self, output):
 		for record in output.records:
@@ -112,15 +114,15 @@ class InferiorReader:
 
 class Gdb:
 	def __init__(self, handler=None, verbose=0):
-		self.console = GdbConsole()
+		self.console = GdbConsole(verbose)
 		self.console.read_until_prompt()
 		self.verbose = verbose
 		self.__next_token = 1
 		self.__dispatcher = GdbDispatcher(self, handler)
 		self.__reader = GdbReader(self, self.__dispatcher)
-#		self.__inferior = InferiorReader(self, self.__dispatcher)
+		self.__inferior = InferiorReader(self, self.__dispatcher)
 		self.__reader.start()
-#		self.__inferior.start()
+		self.__inferior.start()
 
 	def _cmd(self, cmd, args=None):
 		if args is not None:
@@ -147,7 +149,7 @@ class Gdb:
 	# general
 	def wait(self):
 		self.__reader.stop()
-#		self.__inferior.stop()
+		self.__inferior.stop()
 
 	def help(self):
 		return self._cmd('h')
@@ -500,6 +502,12 @@ class GdbDispatcher:
 	def register_token(self, token, delegate):
 		self.__delegates[token] = delegate
 
+	def on_unknown(self, line):
+		if self.__gdb.verbose >= 2:
+			print line
+
+		self.__call_handler('on_log', [line])
+
 	def on_exec(self, event):
 		if self.__gdb.verbose:
 			self.__print_event(event)
@@ -632,7 +640,11 @@ if __name__ == "__main__":
 				print 'gdb error: ' + ex.message
 
 		handler = MyHandler()
-		gdb = Gdb(handler)
+		verbose = 0
+		for x in sys.argv:
+			if x.startswith('-v'):
+				verbose = int(x[2:])
+		gdb = Gdb(handler, verbose)
 		try:
 			gdb.file('qi_release')
 			#gdb.core('core')

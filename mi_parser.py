@@ -175,7 +175,10 @@ def __private():
 				for result in node[2].value:
 					for n, v in result.items():
 						if node.value.has_key(n):
-							node.value[n] = [ node.value[n] ]
+							#print '**********list conversion: [%s] %s -> %s' % (n, node.value[n], v)
+							old = node.value[n]
+							if not isinstance(old, list):
+								node.value[n] = [ node.value[n] ]
 							node.value[n].append(v)
 						else:
 							node.value[n] = v
@@ -197,6 +200,7 @@ def __private():
 				#list ::= [ result result_list ]
 				#list ::= { value }
 				#list ::= { value value_list }
+			#print 'list %s' % node.value
 
 		def n_value_list(self, node):
 			if len(node) == 2:
