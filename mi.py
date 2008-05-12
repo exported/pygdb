@@ -275,6 +275,9 @@ class Gdb:
 		self.break_insert(entry)
 		return self.run(args)
 
+	def create_core(self, filename):
+		return self._cmd('gcore', filename)
+
 	def quit(self):
 		self.kill()
 		self.exit()
