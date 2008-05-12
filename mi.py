@@ -68,20 +68,23 @@ class GdbReader:
 	def __run_loop(self):
 		while(True):
 			lines = self.__console.read_until_prompt()
-			if not lines:
-				break
-
+			if not lines: break
 			for line in lines:
 				try:
 					output = mi_parser.process(line)
-					self.__process_output(output)
-				except Exception, ex:
-					self.__dispatcher.on_unknown(line)
-
-	def __process_output(self, output):
-		for record in output.records:
-			callback = getattr(self.__dispatcher, 'on_' + record.type)
-			callback(record)
+				except Exception:
+					class GdbUnknownEvent:
+						def __init__(self, line):
+							self.type = 'unknown'
+							self.record_type = 'stream'
+							self.value = line
+						def __repr__(self): return self.value
+					output = GdbUnknownEvent(line)
+				try:
+					self.__dispatcher.post_event(output)
+				except Exception:
+					import traceback
+					traceback.print_exc()
 
 class InferiorReader:
 	def __init__(self, gdb, dispatcher):
@@ -93,16 +96,13 @@ class InferiorReader:
 	def start(self):
 		self.__master, self.__slave = os.openpty()
 		self.__stdout = os.fdopen(self.__master)
-		self.__tty = os.ttyname(self.__slave)
-		self.__gdb.inferior_tty_set(self.__tty)
+		self.tty = os.ttyname(self.__slave)
+		self.__gdb.inferior_tty_set(self.tty)
 		self.__thread.start()
 
 	def stop(self):
-		#print 'close slave'
 		os.close(self.__slave)
-		#print 'close master'
 		self.__stdout.close()
-		#print 'join'
 		self.__thread.join()
 
 	def __run_loop(self):
@@ -110,7 +110,105 @@ class InferiorReader:
 			line = self.__stdout.readline()
 			if not line:
 				break
-			print 'inferior: %s' % line
+			#print 'inferior: %s' % line
+			class GdbTargetEvent:
+				def __init__(self, line):
+					self.type = 'target'
+					self.record_type = 'stream'
+					self.value = line
+				def __repr__(self): return self.value
+			self.__dispatcher.post_event(GdbTargetEvent(line))
+
+class GdbError(Exception): pass
+
+class GdbAsyncResult:
+	def __init__(self, dispatcher, token):
+		self.__dispatcher = dispatcher
+		self.__condition = threading.Condition()
+		self.token = token
+		self.result = None
+		self.status = 'pending'
+		self.__dispatcher.register_token(self.token, self.__on_complete)
+
+	def __on_complete(self, status, result):
+		try:
+			self.__condition.acquire()
+			self.status = status
+			self.result = result
+			self.__condition.notify()
+		finally:
+			self.__condition.release()
+
+	def wait(self):
+		try:
+			self.__condition.acquire()
+			while not self.result:
+				self.__condition.wait()
+		finally:
+			self.__condition.release()
+
+		if self.status == 'error':
+			raise GdbError, self.result.msg
+		return self.result
+
+class GdbDispatcher:
+	def __init__(self, gdb, handler):
+		self.__gdb = gdb
+		self.__handler = handler
+		if self.__handler: self.__handler.on_gdb(gdb)
+		self.__delegates = {}
+
+	def __print_event(self, event):
+		if event.token:
+			token = '[' + event.token + ']'
+		else:
+			token = ''
+		print '%s: %s %s' % (event.type, token, event.class_)
+
+	def __print_output(self, output):
+		sys.stdout.write('%s: %s' % (output.type, output.value))
+
+	def __call_handler(self, method, args):
+		if self.__handler and hasattr(self.__handler, method):
+			attr = getattr(self.__handler, method)
+			apply(attr, args)
+
+	def __call_delegate(self, token, status, results):
+		if self.__delegates.has_key(token):
+			delegate = self.__delegates[token]
+			delegate(status, results)
+			self.__delegates.pop(token)
+
+	def post_event(self, event):
+		if event.record_type == 'stream':
+			if self.__gdb.verbose: self.__print_output(event)
+			self.__call_handler('on_' + event.type, [event.value])
+		else:
+			if self.__gdb.verbose: self.__print_event(event)
+			if self.__gdb.verbose >= 2: print event.result
+			status = event.class_
+
+			# Catch this special case before calling on the delegate because
+			# we don't want to remove the registered token.
+			# This event can be treated really as a global one
+			if status == 'running':
+				self.__call_handler('on_running', [event])
+				return
+
+			self.__call_delegate(event.token, event.class_, event.result)
+			if status == 'stopped':
+				self.__call_handler('on_stopped', [event])
+			elif status == 'done':
+				self.__call_handler('on_done', [event.token, event.result])
+			elif status == 'error':
+				self.__call_handler('on_error', [event.token, event.result])
+			elif event.type == 'result' or event.type == 'exec':
+				self.__call_handler('on_complete', [event.token, status, event.result])
+			else:
+				self.__call_handler('on_' + event.type, [event])
+
+	def register_token(self, token, delegate):
+		self.__delegates[token] = delegate
 
 class Gdb:
 	def __init__(self, handler=None, verbose=0):
@@ -123,6 +221,9 @@ class Gdb:
 		self.__inferior = InferiorReader(self, self.__dispatcher)
 		self.__reader.start()
 		self.__inferior.start()
+
+	def _reset_inferior_tty(self):
+		self.inferior_tty_set(self.__inferior.tty)
 
 	def _cmd(self, cmd, args=None):
 		if args is not None:
@@ -328,7 +429,9 @@ class Gdb:
 
 	def run(self, args=None):
 		if args: self.set_args(args)
-		return self._cmd('-exec-run')
+		ret = self._cmd('-exec-run')
+#		self._reset_inferior_tty()
+		return ret
 
 	def step(self):
 		return self._cmd('-exec-step')
@@ -439,133 +542,12 @@ class Gdb:
 	def thread_select(self, num):
 		return self._cmd('-thread-select', num)
 
-class GdbError(Exception): pass
-
-class GdbAsyncResult:
-	def __init__(self, dispatcher, token):
-		self.__dispatcher = dispatcher
-		self.__condition = threading.Condition()
-		self.token = token
-		self.result = None
-		self.status = 'pending'
-		self.__dispatcher.register_token(self.token, self.__on_complete)
-
-	def __on_complete(self, status, result):
-		try:
-			self.__condition.acquire()
-			self.status = status
-			self.result = result
-			self.__condition.notify()
-		finally:
-			self.__condition.release()
-
-	def wait(self):
-		try:
-			self.__condition.acquire()
-			while not self.result:
-				self.__condition.wait()
-		finally:
-			self.__condition.release()
-
-		if self.status == 'error':
-			raise GdbError, self.result.msg
-		return self.result
-
-class GdbDispatcher:
-	def __init__(self, gdb, handler):
-		self.__gdb = gdb
-		self.__handler = handler
-		if self.__handler: self.__handler.on_gdb(gdb)
-		self.__delegates = {}
-
-	def __print_event(self, event):
-		if event.token:
-			token = '[' + event.token + ']'
-		else:
-			token = ''
-		print '%s: %s %s' % (event.type, token, event.class_)
-
-	def __print_output(self, output):
-		print '%s: %s' % (output.type, output.value)
-
-	def __call_handler(self, method, args):
-		if self.__handler and hasattr(self.__handler, method):
-			attr = getattr(self.__handler, method)
-			apply(attr, args)
-
-	def __call_delegate(self, token, status, results):
-		if self.__delegates.has_key(token):
-			delegate = self.__delegates[token]
-			delegate(status, results)
-			self.__delegates.pop(token)
-
-	def register_token(self, token, delegate):
-		self.__delegates[token] = delegate
-
-	def on_unknown(self, line):
-		if self.__gdb.verbose >= 2:
-			print line
-
-		self.__call_handler('on_log', [line])
-
-	def on_exec(self, event):
-		if self.__gdb.verbose:
-			self.__print_event(event)
-
-		if self.__gdb.verbose >= 2:
-			print event.result
-
-		self.__call_delegate(event.token, event.class_, event.result)
-
-		if event.class_ == 'stopped':
-			self.__call_handler('on_stopped', [event])
-
-	def on_result(self, event):
-		if self.__gdb.verbose:
-			self.__print_event(event)
-
-		if self.__gdb.verbose >= 2:
-			print event.result
-
-		if event.class_ == 'running':
-			self.__call_handler('on_running', [event])
-		else:
-			self.on_complete(event.token, event.class_, event.result)
-
-	def on_notify(self, event):
-		if self.__gdb.verbose:
-			self.__print_event(event)
-		self.__call_handler('on_notify', [event])
-
-	def on_console(self, event):
-		if self.__gdb.verbose:
-			self.__print_output(event)
-		self.__call_handler('on_console', [event])
-
-	def on_target(self, event):
-		if self.__gdb.verbose:
-			self.__print_output(event)
-		self.__call_handler('on_target', [event])
-
-	def on_log(self, event):
-		if self.__gdb.verbose:
-			self.__print_output(event)
-		self.__call_handler('on_log', [event])
-
-	def on_complete(self, token, status, results):
-		self.__call_delegate(token, status, results)
-		if status == 'done':
-			self.__call_handler('on_done', [token, results])
-		elif status == 'error':
-			self.__call_handler('on_error', [token, results])
-		else:
-			self.__call_handler('on_complete', [token, status, results])
-
 if __name__ == "__main__":
 	def main():
 		class MyHandler:
-			def __init__(self, verbose=0):
+			def __init__(self, verbose=0, show_output=0):
 				self.verbose = verbose
+				self.show_output = show_output
 
 			def on_gdb(self, gdb):
 				self.__gdb = gdb
@@ -584,6 +566,12 @@ if __name__ == "__main__":
 
 			def on_done(self, token, results):
 				if self.verbose: print 'done'
+
+			def on_log(self, text):
+				if self.verbose: sys.stdout.write(text)
+
+			def on_target(self, text):
+				if self.show_output: sys.stdout.write('> ' + text)
 
 		def print_locals(gdb):
 			try:
@@ -639,17 +627,25 @@ if __name__ == "__main__":
 			except GdbError, ex:
 				print 'gdb error: ' + ex.message
 
-		handler = MyHandler()
 		verbose = 0
+		show_output = 0
 		for x in sys.argv:
 			if x.startswith('-v'):
 				verbose = int(x[2:])
+			if x.startswith('-o'):
+				show_output = 1
+		handler = MyHandler(verbose, show_output)
 		gdb = Gdb(handler, verbose)
 		try:
-			gdb.file('qi_release')
+			gdb.file('qi')
+			print 'run to completion'
+			result = gdb.run().wait()
+
+			print_stack(gdb)
 			#gdb.core('core')
 			print_registers(gdb)
 			result = gdb.start().wait()
+			bp = result.bkptno
 			print 'start: bkptno: %s, reason: %s, thread-id: %s' % (
 				result.bkptno,
 				result.reason,
@@ -675,21 +671,10 @@ if __name__ == "__main__":
 			print_arguments(gdb)
 			print_locals(gdb)
 
-			print 'run'
-			gdb.run().wait()
-
-			print 'sleep'
-			import time
-			time.sleep(0.1)
-
-			print 'interrupt'
-			result = gdb.interrupt().wait()
-			print_stack(gdb)
-
-			print 'run to completion'
-			result = gdb.run().wait()
+			gdb.break_delete(bp)
 
 		except Exception, ex:
-			print ex.message
+			import traceback
+			traceback.print_exc()
 		gdb.quit()
 	main()

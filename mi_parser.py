@@ -235,21 +235,24 @@ def __private():
 				node.value = {
 					'token': node[0].value,
 					'type': self.__translate_type(node[1].value),
-					'class_': node[2].value
+					'class_': node[2].value,
+					'record_type': 'result'
 				}
 			elif len(node) == 2:
 				# result_header ::= result_type class
 				node.value = {
 					'token': None,
 					'type': self.__translate_type(node[0].value),
-					'class_': node[1].value
+					'class_': node[1].value,
+					'record_type': 'result'
 				}
 
 		def n_stream_record(self, node):
 			# stream_record ::= stream_type c_string nl
 			node.value = {
 				'type': self.__translate_type(node[0].value),
-				'value': node[1].value
+				'value': node[1].value,
+				'record_type': 'stream'
 			}
 			#print 'stream_record: %s' % node.value
 
@@ -302,9 +305,9 @@ def __private():
 
 	class GdbMiRecord:
 		def __init__(self, record):
-			for name, value in record.items():
+			self.result = None
+			for name, value in record[0].items():
 				name = name.replace('-', '_')
-				self.result = None
 				if name == 'results':
 					for result in value:
 						if not self.result:
@@ -315,22 +318,10 @@ def __private():
 				else:
 					setattr(self, name, value)
 
-
-	class GdbMiOutput:
-		def __init__(self, raw, input):
-			self.raw = raw
-			self.input = input
-			if isinstance(input, list):
-				self.records = []
-				for record in input:
-					self.records.append(GdbMiRecord(record))
-			else:
-				self.records = [ GdbMiRecord(input) ]
-
 		def __repr__(self):
-			return self.raw
+			return pprint.pformat(self.__dict__)
 
-	return (GdbMiScanner(), GdbMiParser(), GdbMiInterpreter, GdbMiOutput)
+	return (GdbMiScanner(), GdbMiParser(), GdbMiInterpreter, GdbMiRecord)
 
 (__the_scanner, __the_parser, __the_interpreter, __the_output) = __private()
 
@@ -344,7 +335,7 @@ def process(input):
 	tokens = scan(input)
 	ast = parse(tokens)
 	__the_interpreter(ast)
-	return __the_output(input, ast.value)
+	return __the_output(ast.value)
 
 if __name__ == '__main__':
 	def main():
@@ -357,13 +348,15 @@ if __name__ == '__main__':
 					print token.type
 
 		def run_test(test):
-			tokens = scan(test)
-			#print_tokens(tokens)
+			lines = test.splitlines()
+			for line in lines:
+				tokens = scan(line + '\n')
+				#print_tokens(tokens)
 
-			ast = parse(tokens)
-			__the_interpreter(ast)
-			output = __the_output(test, ast.value)
-			print output
+				ast = parse(tokens)
+				__the_interpreter(ast)
+				output = __the_output(ast.value)
+				print output
 
 		x = '"No symbol table is loaded.  Use the \\"file\\" command."'
 		m = re.match('\".*?(?<![\\\\])\"', x)
@@ -371,23 +364,23 @@ if __name__ == '__main__':
 
 		test1 = '22^done,time={wallclock="0.05395",user="0.02996",system="0.02222",start="1210321030.972724",end="1210321031.026675"}\n'
 		test2 = '''~"[Switching to process 3832 local thread 0x3607]\\n"
-	=shlibs-updated
-	^running
-	'''
+=shlibs-updated
+^running
+'''
 
 		test3 = '''=shlibs-added,shlib-info={num="2",name="qi",kind="-",dyld-addr="0x1000",reason="exec",requested-state="Y",state="Y",path="/Users/franklaub/bin/qi",description="/Users/franklaub/bin/qi",loaded_addr="",slide="0x0",prefix="",dsym-objpath="/Users/franklaub/bin/qi.dSYM/Contents/Resources/DWARF/qi"},time={now="1210290757.432413"}
-	=shlibs-added,shlib-info={num="3",name="libgcc_s.1.dylib",kind="-",dyld-addr="0x9230a000",reason="dyld",requested-state="Y",state="Y",path="/usr/lib/libgcc_s.1.dylib",description="/usr/lib/libgcc_s.1.dylib",loaded_addr="0x9230a000",slide="-0x6dcf6000",prefix=""},time={now="1210290757.432771"}
-	=shlibs-added,shlib-info={num="4",name="libSystem.B.dylib",kind="-",dyld-addr="0x950aa000",reason="dyld",requested-state="Y",state="Y",path="/usr/lib/libSystem.B.dylib",description="/usr/lib/libSystem.B.dylib",loaded_addr="0x950aa000",slide="-0x6af56000",prefix="",commpage-objpath="/usr/lib/libSystem.B.dylib[LC_SEGMENT.__DATA.__commpage]"},time={now="1210290757.433091"}
-	=shlibs-added,shlib-info={num="5",name="libmathCommon.A.dylib",kind="-",dyld-addr="0x95018000",reason="dyld",requested-state="Y",state="Y",path="/usr/lib/system/libmathCommon.A.dylib",description="/usr/lib/system/libmathCommon.A.dylib",loaded_addr="0x95018000",slide="-0x6afe8000",prefix=""},time={now="1210290757.433390"}
-	*stopped,time={wallclock="1.02740",user="0.00379",system="0.00791",start="1210290756.408774",end="1210290757.436179"},reason="breakpoint-hit",commands="no",times="1",bkptno="1",thread-id="1"
-	'''
+=shlibs-added,shlib-info={num="3",name="libgcc_s.1.dylib",kind="-",dyld-addr="0x9230a000",reason="dyld",requested-state="Y",state="Y",path="/usr/lib/libgcc_s.1.dylib",description="/usr/lib/libgcc_s.1.dylib",loaded_addr="0x9230a000",slide="-0x6dcf6000",prefix=""},time={now="1210290757.432771"}
+=shlibs-added,shlib-info={num="4",name="libSystem.B.dylib",kind="-",dyld-addr="0x950aa000",reason="dyld",requested-state="Y",state="Y",path="/usr/lib/libSystem.B.dylib",description="/usr/lib/libSystem.B.dylib",loaded_addr="0x950aa000",slide="-0x6af56000",prefix="",commpage-objpath="/usr/lib/libSystem.B.dylib[LC_SEGMENT.__DATA.__commpage]"},time={now="1210290757.433091"}
+=shlibs-added,shlib-info={num="5",name="libmathCommon.A.dylib",kind="-",dyld-addr="0x95018000",reason="dyld",requested-state="Y",state="Y",path="/usr/lib/system/libmathCommon.A.dylib",description="/usr/lib/system/libmathCommon.A.dylib",loaded_addr="0x95018000",slide="-0x6afe8000",prefix=""},time={now="1210290757.433390"}
+*stopped,time={wallclock="1.02740",user="0.00379",system="0.00791",start="1210290756.408774",end="1210290757.436179"},reason="breakpoint-hit",commands="no",times="1",bkptno="1",thread-id="1"
+'''
 
 		test4 = '''=shlibs-added,shlib-info={num="2",name="qi",kind="-",dyld-addr="0x1000",reason="exec",requested-state="Y",state="Y",path="/Users/franklaub/bin/qi",description="/Users/franklaub/bin/qi",loaded_addr="",slide="0x0",prefix="",dsym-objpath="/Users/franklaub/bin/qi.dSYM/Contents/Resources/DWARF/qi"},time={now="1210290757.432413"}
-	^running
-	'''
+^running
+'''
 		test5 = '''=class,variable={frame={x="2"},frame={x="2"}, regs={"1","2","3"}}
-	^running
-	'''
+^running
+'''
 		test6 = '10^done,stack-args={frame={level="0",args={}}},time={wallclock="0.00006",user="0.00004",system="0.00002",start="1210530442.460765",end="1210530442.460825"}\n'
 
 		run_test(test1)
