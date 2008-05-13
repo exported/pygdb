@@ -1,4 +1,6 @@
 
+import sys
+import os
 from pygdb import Gdb
 
 if __name__ == "__main__":
