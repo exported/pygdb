@@ -1,7 +1,7 @@
 
 import sys
 import os
-from pygdb import *
+from pygdb import Gdb, GdbError
 
 if __name__ == "__main__":
 	def main():
