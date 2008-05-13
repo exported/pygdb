@@ -1,0 +1,5 @@
+pygdb install guide
+===================
+
+python setup.py install
+
