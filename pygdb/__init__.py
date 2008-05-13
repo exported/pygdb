@@ -27,4 +27,6 @@
 # $Id$
 
 __all__ = [ 'mi' ]
-from mi import Gdb
+from mi import Gdb, GdbError
+
+# end
